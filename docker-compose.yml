@@ -1,0 +1,183 @@
+# 生产编排（单机）。用法见 deploy/README.md。
+#
+#   db → migrate（一次性，退出码 0 才算过）→ app（Next + 内嵌 worker）→ nginx
+#   cron 负责夜间备份与对账，是 worker 挂掉之外唯一还需要额外进程的事。
+#
+# ★ 变量都从同目录的 .env 插值（compose 自动读），那份文件不要进版本库。
+name: aigc
+
+# 所有服务共用：不限制日志体积的话，容器日志能把系统盘撑爆
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: '50m'
+      max-file: '5'
+
+# app / migrate / seed 共用同一套环境变量，避免三处各写一份后改漏
+x-app-env: &app-env
+  NODE_ENV: production
+  TZ: Asia/Shanghai
+  DATABASE_URL: postgresql://${POSTGRES_USER:-aigc}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}@db:5432/${POSTGRES_DB:-aigc}?schema=public&connection_limit=10&pool_timeout=20
+  NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:?NEXT_PUBLIC_SITE_URL 必须设置}
+  AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET 必须设置}
+  AUTH_URL: ${NEXT_PUBLIC_SITE_URL}
+  AUTH_TRUST_HOST: 'true'
+  AUTH_GITHUB_ID: ${AUTH_GITHUB_ID:-}
+  AUTH_GITHUB_SECRET: ${AUTH_GITHUB_SECRET:-}
+  # 生产默认走 OSS；本地想跑同一套编排就设 STORAGE_DRIVER=local
+  STORAGE_DRIVER: ${STORAGE_DRIVER:-oss}
+  # 本地驱动时指向挂载卷，不要写进容器可写层
+  STORAGE_LOCAL_ROOT: /app/.data/storage
+  OSS_REGION: ${OSS_REGION:-}
+  OSS_BUCKET: ${OSS_BUCKET:-}
+  OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+  OSS_ENDPOINT_INTERNAL: ${OSS_ENDPOINT_INTERNAL:-}
+  OSS_USE_INTERNAL: ${OSS_USE_INTERNAL:-true}
+  OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+  OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+  # 必需：走 OSS 时它就是 CDN 域名，漏配不会报错，只会让所有 public/* 图 404
+  CDN_BASE_URL: ${CDN_BASE_URL:?CDN_BASE_URL 必须设置}
+  # 火山引擎方舟。留空 → provider 不注册 → 模型不进目录。
+  # ★ 这份清单是显式透传的，漏加这一行的话 .env 里配了 key 容器里也看不到
+  ARK_API_KEY: ${ARK_API_KEY:-}
+  # 阿里云百炼（DashScope）。同样留空 → provider 不注册 → 模型不进目录。
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+  # ofox.ai 中转站（OpenAI 兼容 /v1）。同样留空 → provider 不注册 → 模型不进目录。
+  OFOX_API_KEY: ${OFOX_API_KEY:-}
+  MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-1800}
+  MOCK_ASYNC: ${MOCK_ASYNC:-false}
+  MOCK_FAILURE_RATE: ${MOCK_FAILURE_RATE:-0}
+  MOCK_TIMEOUT_RATE: ${MOCK_TIMEOUT_RATE:-0}
+  PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-120000}
+  GENERATION_DEADLINE_MS: ${GENERATION_DEADLINE_MS:-900000}
+  POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-3000}
+  WORKER_ENABLED: ${WORKER_ENABLED:-true}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+  # 租约：worker 挂掉后多久允许别人重新领取这条任务。调小 = 恢复更快、误抢更多
+  LEASE_TTL_MS: ${LEASE_TTL_MS:-180000}
+  DAILY_FREE_CREDITS: ${DAILY_FREE_CREDITS:-20}
+  SIGNUP_BONUS_CREDITS: ${SIGNUP_BONUS_CREDITS:-30}
+  RATE_LIMIT_GENERATIONS_PER_5MIN: ${RATE_LIMIT_GENERATIONS_PER_5MIN:-10}
+  CRON_SECRET: ${CRON_SECRET:?CRON_SECRET 必须设置}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # 不映射端口：只有同网络的容器能连
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aigc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      POSTGRES_DB: ${POSTGRES_DB:-aigc}
+      TZ: Asia/Shanghai
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-aigc} -d ${POSTGRES_DB:-aigc}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    <<: *logging
+
+  # 一次性：跑完 prisma migrate deploy 就退出，app 等它退出码 0 才启动
+  #
+  # ★ 这里刻意不写 build:，镜像由 deploy/scripts/deploy.sh 用 docker build 显式构建。
+  #   两个原因：compose 的构建路径在部分环境下会因为 gRPC 会话头直接失败；
+  #   而且 app/migrate/seed 三个服务共用一份 Dockerfile，显式构建能让三个 target
+  #   复用同一份层缓存，而不是各建一遍。
+  migrate:
+    image: aigc-migrate:latest
+    restart: 'no'
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: *app-env
+    <<: *logging
+
+  # 首次部署才有意义（建管理员 / 模型目录 / 风格 / 提示词 / 探索内容）。
+  # 挂 profile 就不参与 `up -d`，只在显式 target 时跑：
+  #   docker compose run --rm seed
+  seed:
+    image: aigc-migrate:latest
+    profiles: ['tools']
+    restart: 'no'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    command: ['pnpm', 'db:seed']
+    volumes:
+      # ★ 必须和 app 挂同一个卷：seed 要写风格缩略图和探索封面，用 local 驱动时
+      #   不挂就写进一次性容器的临时盘，容器一退就没了，页面上的图全 404
+      - appdata:/app/.data
+    <<: *logging
+
+  app:
+    image: aigc-app:latest
+    restart: unless-stopped
+    # ★ 必须指定 DNS：生产机上 api.ofox.ai 被解析成 Facebook/Twitter 的 IP，
+    #   直连 20 秒超时，ofox 那 4 个模型一个都调不通 —— 但链路本身没被封，
+    #   用真实 IP 直连只要 40ms。实测只有 114 给出正确答案，223.5.5.5 /
+    #   119.29.29.29 / 180.76.76.76 返回的全是污染结果。
+    #   Docker 内嵌 DNS 仍优先处理容器名（db / app），只有外部域名转发到这里。
+    dns:
+      - 114.114.114.114
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *app-env
+    volumes:
+      # 只有 STORAGE_DRIVER=local 会写这里；走 OSS 时它是空的
+      - appdata:/app/.data
+    <<: *logging
+
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - '${HTTP_PORT:-80}:80'
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./deploy/nginx/snippets:/etc/nginx/snippets:ro
+      - ./deploy/certs/acme:/var/www/certbot:ro
+    <<: *logging
+
+  # 夜间维护：pg_dump 备份 + 余额对账。见 deploy/scripts/cron-loop.sh
+  cron:
+    image: aigc-cron:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_started
+    environment:
+      TZ: Asia/Shanghai
+      PGHOST: db
+      PGPORT: '5432'
+      PGUSER: ${POSTGRES_USER:-aigc}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      PGDATABASE: ${POSTGRES_DB:-aigc}
+      # 对账要打 app 的内部端点，用同一个共享密钥
+      CRON_SECRET: ${CRON_SECRET:?CRON_SECRET 必须设置}
+      APP_BASE_URL: http://app:3000
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+    volumes:
+      - ./deploy/scripts:/scripts:ro
+      - ./deploy/backups:/backups
+    <<: *logging
+
+volumes:
+  pgdata: {}
+  appdata: {}

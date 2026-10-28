@@ -1,0 +1,238 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 深色科技感 · 深黑底 + 紫/青光晕 */
+    --background: 240 33% 4%;
+    --foreground: 240 10% 96%;
+
+    --card: 240 24% 7%;
+    --card-foreground: 240 10% 96%;
+
+    --popover: 240 28% 6%;
+    --popover-foreground: 240 10% 96%;
+
+    --primary: 265 86% 64%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 16% 13%;
+    --secondary-foreground: 240 10% 96%;
+
+    --muted: 240 16% 13%;
+    --muted-foreground: 240 8% 62%;
+
+    --accent: 189 92% 55%;
+    --accent-foreground: 240 33% 5%;
+
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 240 14% 17%;
+    --input: 240 14% 17%;
+    --ring: 265 86% 64%;
+
+    /**
+     * ★ 下面这几个是「派生色」。从前 .glow-bg / .ring-glow / .shimmer / .text-gradient
+     *   是把 primary / accent 的数值手抄成字面量的 —— 一旦改 --primary，光晕、描边光、
+     *   扫光、渐变字不会跟着变，四处一起漂移。收进 token 后只改上面两行即可。
+     */
+    --primary-soft: 265 90% 78%; /* 渐变字用的浅紫 */
+    --accent-soft: 189 92% 68%; /* 渐变字用的浅青 */
+    --glass: 240 24% 8%; /* 玻璃面板底色，比 --card 亮一档 */
+    --checker-a: 240 17% 13%; /* 透明区棋盘格 */
+    --checker-b: 240 20% 8%;
+
+    /* 动效令牌：统一时长与缓动，新写的过渡直接引用，别再手写 duration */
+    --ease-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --dur-fast: 150ms;
+    --dur-base: 240ms;
+    --dur-slow: 420ms;
+
+    --radius: 0.75rem;
+
+    --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+      'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC',
+      'Source Han Sans SC', sans-serif;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+  }
+
+  /* 细滚动条，配合深色主题 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 999px;
+    border: 2px solid hsl(var(--background));
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(240 12% 26%);
+  }
+}
+
+@layer components {
+  /* 页面级光晕背景：紫 / 青两团模糊光斑 */
+  .glow-bg {
+    position: relative;
+    isolation: isolate;
+  }
+  .glow-bg::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        60rem 40rem at 12% -10%,
+        hsl(var(--primary) / 0.22),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 34rem at 92% 6%,
+        hsl(var(--accent) / 0.16),
+        transparent 62%
+      );
+  }
+
+  /* 玻璃拟态面板 */
+  .glass {
+    background: hsl(var(--glass) / 0.72);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid hsl(var(--border) / 0.9);
+  }
+
+  /* 渐变文字 */
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(
+      100deg,
+      hsl(0 0% 100%) 0%,
+      hsl(var(--primary-soft)) 45%,
+      hsl(var(--accent-soft)) 100%
+    );
+  }
+
+  /* 主按钮的渐变描边光 */
+  .ring-glow {
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.5),
+      0 8px 40px -8px hsl(var(--primary) / 0.55);
+  }
+}
+
+@layer utilities {
+  /* 骨架屏扫光 */
+  .shimmer {
+    position: relative;
+    overflow: hidden;
+  }
+  .shimmer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--primary) / 0.14),
+      hsl(var(--accent) / 0.14),
+      transparent
+    );
+    animation: shimmer 1.8s infinite;
+  }
+
+  /* 透明区棋盘格：抠图结果必须让人一眼看出「这里是空的」 */
+  .checkerboard {
+    background-image: repeating-conic-gradient(
+      hsl(var(--checker-a)) 0% 25%,
+      hsl(var(--checker-b)) 0% 50%
+    );
+    background-size: 20px 20px;
+  }
+
+  /**
+   * 列表入场：子元素依次上浮。
+   * ★ 纯 CSS，不依赖 IntersectionObserver —— 元素一挂载就播，静止态就是最终态，
+   *   所以缩略图、分享链接、快速扫读看到的都是完整内容，不会停在 opacity:0。
+   *   逐个延迟用 nth-child 表达，组件侧不需要传 index。
+   */
+  .enter-stagger > * {
+    animation: enter-up var(--dur-slow) var(--ease-soft) both;
+  }
+  .enter-stagger > *:nth-child(1) { animation-delay: 0ms; }
+  .enter-stagger > *:nth-child(2) { animation-delay: 40ms; }
+  .enter-stagger > *:nth-child(3) { animation-delay: 80ms; }
+  .enter-stagger > *:nth-child(4) { animation-delay: 120ms; }
+  .enter-stagger > *:nth-child(5) { animation-delay: 160ms; }
+  .enter-stagger > *:nth-child(6) { animation-delay: 200ms; }
+  .enter-stagger > *:nth-child(7) { animation-delay: 240ms; }
+  .enter-stagger > *:nth-child(8) { animation-delay: 280ms; }
+  /* 第 9 个起不再累加：再往后延迟会长到让人等 */
+  .enter-stagger > *:nth-child(n + 9) { animation-delay: 320ms; }
+
+  /* 单元素入场，用于页面主区块 */
+  .enter-up {
+    animation: enter-up var(--dur-slow) var(--ease-soft) both;
+  }
+}
+
+/**
+ * ★ keyframes 放顶层，不放进 @layer：
+ *   Tailwind 会重排 utilities 层里的规则，被搬动后是否还生效不稳；
+ *   顶层普通 CSS 一定原样输出。
+ */
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/**
+ * ★ 全局动效降级。从前只有首页那片视差做了 prefers-reduced-motion 判断，
+ *   其余入场 / 过渡照播。这里一刀切掉，让系统级「减少动态效果」真正生效。
+ *   时长压到 0.01ms 而不是整个 animation: none —— 前者让动画直接落到终态，
+ *   凡是靠 fill-mode: both 定住结束状态的元素都不会半路停住。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    /* ★ 延迟也要压掉：enter-stagger 的错峰延迟最长 320ms，
+       只压 duration 的话，fill-mode: both 会让元素在这段时间里停在 opacity:0 */
+    animation-delay: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

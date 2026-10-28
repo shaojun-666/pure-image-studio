@@ -1,0 +1,46 @@
+node_modules/
+.pnpm-store/
+# 项目改名时 pnpm 的绝对软链全断，留下的空壳（见 README 部署排错），别进仓库
+node_modules.broken/
+
+# next
+/.next/
+/.next-verify/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+
+# runtime data (local storage driver, logs)
+/.data/
+
+# env
+.env
+.env.local
+.env*.local
+.env.production
+
+# misc
+.DS_Store
+*.pem
+*.key
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vercel
+
+# 数据库备份（含真实用户数据，绝不上传）
+deploy/backups/**/*.dump
+deploy/backups/**/*.sql
+deploy/backups/**/*.tar.gz
+
+# 本机工具配置
+.claude/settings.local.json
+
+# 打包产物
+*.tar.gz
+aigc-src.tar.gz
+
+# 设计文档：只公开需求分析，提示词序列留在本地
+/docs/1-AI交互提示词序列.*
+/docs/Pure 图像工作室 · 提示词序列.pdf
+

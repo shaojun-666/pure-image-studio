@@ -1,0 +1,601 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7 起 datasource 不再接受 url：
+// 迁移用的连接串在 prisma.config.ts，运行时连接由 PrismaClient 的 adapter 提供。
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────── 枚举 ─────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum ModelTier {
+  FAST
+  QUALITY
+  ULTRA
+}
+
+/// 生成模式。顺序与 src/lib/ai/contracts.ts 的 GENERATION_MODES 保持一致。
+enum GenerationMode {
+  TEXT_TO_IMAGE
+  IMAGE_TO_IMAGE
+  INPAINT
+  OUTPAINT
+  REMOVE_BACKGROUND
+  UPSCALE
+  STYLE_TRANSFER
+  REMOVE_OBJECT
+}
+
+enum GenerationStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  CANCELED
+}
+
+enum ImageStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// 积分流水类型。追加写，永不修改或删除。
+enum LedgerKind {
+  SIGNUP_BONUS
+  DAILY_GRANT
+  ADMIN_GRANT
+  GENERATION_HOLD
+  GENERATION_SETTLE
+  GENERATION_REFUND
+  ADJUSTMENT
+}
+
+/// 用户上传素材的角色。
+enum AssetKind {
+  REFERENCE
+  STYLE_REF
+  SUBJECT_REF
+  CONTROL
+  MASK
+  UPLOAD
+}
+
+enum PublishStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum StyleCategory {
+  ANIME
+  REALISTIC
+  THREE_D
+  ILLUSTRATION
+  OIL_PAINTING
+  CYBERPUNK
+  CHINESE_WASH
+  WATERCOLOR
+  PIXEL_ART
+  PHOTOGRAPHY
+  CONCEPT_ART
+  LINE_ART
+  CLAYMATION
+  LOWPOLY
+  POSTER
+  OTHER
+}
+
+// ───────────────────────── 用户与认证 ─────────────────────────
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  passwordHash  String? // OAuth-only 用户为 null
+  role          Role       @default(USER)
+  status        UserStatus @default(ACTIVE)
+  /// 余额缓存。真相在 CreditLedger，夜间对账修复漂移。
+  creditBalance Int        @default(0)
+  locale        String     @default("zh")
+  lastLoginAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  accounts     Account[]
+  sessions     Session[]
+  generations  Generation[]
+  images       GenerationImage[]
+  assets       Asset[]
+  ledger       CreditLedger[]
+  dailyGrants  DailyGrant[]
+  favorites    Favorite[]
+  collections  Collection[]
+  characters   Character[]
+  stylesOwned  StylePreset[]     @relation("StyleOwner")
+  promptsOwned PromptPreset[]    @relation("PromptOwner")
+  posts        ExplorePost[]     @relation("PostAuthor")
+  resets       PasswordResetToken[]
+  auditLogs    AdminAuditLog[]
+
+  @@index([createdAt])
+  @@index([role, status])
+}
+
+// Auth.js v5 适配表：字段名（含 snake_case）不可改
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique // 只存 sha256，原始 token 仅出现在邮件里
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ───────────────────────── 目录（模型 / 风格 / 提示词） ─────────────────────────
+
+model ModelRegistry {
+  /// id 就是 slug，例如 'mock-flash'
+  id                 String    @id
+  providerKey        String
+  providerModelId    String
+  displayNameI18n    Json
+  descriptionI18n    Json?
+  badgeI18n          Json?
+  tier               ModelTier
+  /// 由代码目录写入；后台只能通过 creditCostOverride 覆盖
+  creditCost         Int
+  creditCostOverride Int?
+  /// ModelCapabilities 快照。权威来源是代码，此处仅供后台展示。
+  capabilities       Json
+  maxBatch           Int       @default(4)
+  sortOrder          Int       @default(100)
+  enabled            Boolean   @default(true)
+  isVisible          Boolean   @default(true)
+  isDefault          Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  generations Generation[]
+  styles      StylePreset[]
+  prompts     PromptPreset[]
+  posts       ExplorePost[]
+
+  @@index([enabled, isVisible, sortOrder])
+  @@index([tier])
+}
+
+model StylePreset {
+  id                 String        @id @default(cuid())
+  slug               String        @unique
+  nameI18n           Json
+  descriptionI18n    Json?
+  category           StyleCategory
+  tags               String[]      @default([])
+  thumbnailKey       String
+  previewKeys        String[]      @default([])
+  promptSuffix       String        @db.Text
+  negativeSuffix     String?       @db.Text
+  defaultParams      Json?
+  recommendedModelId String?
+  isCurated          Boolean       @default(true)
+  /// 有值 = 属于该用户的「我的风格」
+  ownerUserId        String?
+  sortOrder          Int           @default(100)
+  enabled            Boolean       @default(true)
+  usageCount         Int           @default(0)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  model  ModelRegistry? @relation(fields: [recommendedModelId], references: [id])
+  owner  User?          @relation("StyleOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  generations Generation[]
+  posts       ExplorePost[]
+
+  @@index([enabled, isCurated, category, sortOrder])
+  @@index([ownerUserId, updatedAt])
+}
+
+model PromptPreset {
+  id                 String   @id @default(cuid())
+  slug               String   @unique
+  titleI18n          Json
+  /// 提示词正文永不翻译——它是用户要复制走的产物
+  prompt             String   @db.Text
+  negativePrompt     String?  @db.Text
+  category           String
+  tags               String[] @default([])
+  coverKey           String?
+  recommendedModelId String?
+  isCurated          Boolean  @default(true)
+  ownerUserId        String?
+  sortOrder          Int      @default(100)
+  enabled            Boolean  @default(true)
+  usageCount         Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  model ModelRegistry? @relation(fields: [recommendedModelId], references: [id])
+  owner User?          @relation("PromptOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, category, sortOrder])
+  @@index([ownerUserId])
+}
+
+/// 用户自建的「形象」。一段外形描述 + 一张参考图，提示词里用 @[名字] 引用，
+/// 目的只有一个：让连续生成的几张图里，同一个角色长得一样。
+///
+/// 两条注入路径，缺一不可：
+///   1. description 拼进提示词 —— 全模式全模型都能用，但只是「把描述写死」
+///   2. assetId 作为 role='subject' 的参考图传给厂商 —— 一致性真强，
+///      但只有实测确认认这张图的模型能用（见 providers/dashscope.ts 的 SUBJECT_VERIFIED）
+/// 模型不满足第 2 条时只走第 1 条，不报错 —— 这是有意设计的降级，不是没做完。
+model Character {
+  id          String   @id @default(cuid())
+  userId      String
+  /// ★ 同一用户下唯一。@[名字] 靠它反查 id，重名会让解析出现歧义，
+  ///   所以唯一约束是功能正确性的一部分，不是随手加的。
+  name        String
+  /// 外形描述。空串 = 只走参考图那条路（用在不支持参考图的模型上就等于这个形象没生效）
+  description String   @db.Text @default("")
+  /// ★ 参考图，**可空**。空 = 文字形象（只能靠 description 注入，任何模型都能用），
+  ///   非空 = 图片形象（在实测支持 subject 的模型上还会带上这张图）。
+  ///   这就是两种形象的唯一判据，不再另设 kind 枚举 —— 多一个字段就多一个可能与
+  ///   本字段矛盾的双真源。
+  ///   从历史生成里挑的那种，是复用同一个 storageKey 新建的 Asset 行
+  ///   （填 sourceImageId），不复制字节。
+  assetId     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// ★ 可空关系上仍然是 Cascade，**有意不改成 SetNull**（ExplorePost.imageId 是 SetNull，
+  ///   那是给「帖子配图被删」用的，语义不同）。SetNull 会把图片形象静默降级成文字形象 ——
+  ///   若它描述为空，就变成一个占着名字、实际什么都不注入的空壳。静默坏掉比显式删掉更差。
+  ///   另：Asset 目前没有 GC 实现（expiresAt 只写不读），这条路径实际不会触发。
+  asset Asset? @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ───────────────────────── 生成 ─────────────────────────
+
+model Generation {
+  id      String           @id @default(cuid())
+  userId  String
+  modelId String
+  mode    GenerationMode
+  status  GenerationStatus @default(PENDING)
+
+  // ── 输入 ──
+  prompt             String   @db.Text
+  negativePrompt     String?  @db.Text
+  enhancedPrompt     String?  @db.Text
+  aspectRatio        String
+  resolution         String
+  batchCount         Int
+  seed               BigInt?
+  guidance           Float?
+  strength           Float?
+  stylePresetId      String?
+  referenceAssetIds  String[] @default([])
+  maskAssetId        String?
+  /// 模式专属参数：outpaint 的 expand、upscale 的 factor、controlType、参考图权重等
+  params             Json     @default("{}")
+  parentImageId      String?
+  parentGenerationId String?
+
+  // ── 执行 ──
+  providerKey    String
+  providerJobId  String?
+  providerRaw    Json?
+  attempts       Int       @default(0)
+  lockedAt       DateTime?
+  lockedBy       String?
+  nextPollAt     DateTime?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  durationMs     Int?
+
+  // ── 结果与钱 ──
+  succeededCount  Int @default(0)
+  failedCount     Int @default(0)
+  costPerImage    Int
+  creditsHeld     Int
+  creditsSpent    Int @default(0)
+  creditsRefunded Int @default(0)
+
+  // ── 运维 ──
+  idempotencyKey String
+  errorCode      String?
+  errorMessage   String?  @db.Text
+  ip             String?
+  userAgent      String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model  ModelRegistry   @relation(fields: [modelId], references: [id])
+  style  StylePreset?    @relation(fields: [stylePresetId], references: [id])
+  images GenerationImage[]
+  ledger CreditLedger[]
+
+  /// ★ 防重复提交
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([status, nextPollAt])
+  @@index([status, lockedAt])
+  @@index([modelId, createdAt])
+  @@index([createdAt])
+}
+
+model GenerationImage {
+  id           String      @id @default(cuid())
+  generationId String
+  /// 冗余 userId：历史列表查询免去一次 join
+  userId       String
+  index        Int
+  status       ImageStatus @default(PENDING)
+  storageKey   String
+  thumbKey     String?
+  /// 24px webp data URI，用于 blur-up 占位
+  placeholder  String?     @db.Text
+  width        Int
+  height       Int
+  mimeType     String      @default("image/png")
+  bytes        Int         @default(0)
+  seed         BigInt?
+  revisedPrompt String?    @db.Text
+  nsfwFlagged  Boolean     @default(false)
+  isPublic     Boolean     @default(false)
+  favoriteCount Int        @default(0)
+  errorMessage String?
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  generation      Generation       @relation(fields: [generationId], references: [id], onDelete: Cascade)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  favorites       Favorite[]
+  collectionItems CollectionItem[]
+  explorePost     ExplorePost?
+
+  /// ★ 崩溃重跑幂等
+  @@unique([generationId, index])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([generationId, status])
+  @@index([userId, deletedAt])
+}
+
+model Asset {
+  id            String    @id @default(cuid())
+  userId        String
+  kind          AssetKind
+  storageKey    String
+  thumbKey      String?
+  mimeType      String
+  bytes         Int
+  width         Int
+  height        Int
+  /// 「用作参考」来自某张生成结果时记录来源
+  sourceImageId String?
+  /// 未被引用的上传素材在此时间后被 GC
+  /// ★ 但**目前没有任何代码读这个字段来删除** —— GC 只有字段、没有实现，全仓库只写不读。
+  ///   将来真要实现清理，必须先排除被 Character 引用的行，否则用户建的「形象」
+  ///   会在 7 天后静默损坏（图没了、描述还在，出图时参考图 404）。别再踩一次。
+  expiresAt     DateTime?
+  createdAt     DateTime  @default(now())
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  characters Character[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+}
+
+// ───────────────────────── 积分 ─────────────────────────
+
+model CreditLedger {
+  id             String     @id @default(cuid())
+  userId         String
+  kind           LedgerKind
+  /// 正为入、负为出
+  delta          Int
+  /// 该笔之后的余额快照，使流水自审计
+  balanceAfter   Int
+  grossCost      Int        @default(0)
+  generationId   String?
+  modelId        String?
+  adminId        String?
+  reason         String?    @db.Text
+  metadata       Json?
+  /// ★ 幂等的唯一依靠
+  idempotencyKey String     @unique
+  createdAt      DateTime   @default(now())
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generation Generation? @relation(fields: [generationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([kind, createdAt])
+  @@index([generationId])
+}
+
+model DailyGrant {
+  id        String   @id @default(cuid())
+  userId    String
+  /// 'YYYY-MM-DD'（Asia/Shanghai）
+  day       String
+  amount    Int
+  ledgerId  String?  @unique
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// ★ 每日赠送天然不累积
+  @@unique([userId, day])
+  @@index([day])
+}
+
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  action     String
+  targetType String
+  targetId   String
+  diff       Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, createdAt(sort: Desc)])
+  @@index([targetType, targetId])
+}
+
+// ───────────────────────── 收藏与作品广场 ─────────────────────────
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  imageId   String
+  createdAt DateTime @default(now())
+
+  user  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  image GenerationImage @relation(fields: [imageId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, imageId])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Collection {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  description  String?
+  coverImageId String?
+  isPublic     Boolean  @default(false)
+  itemCount    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CollectionItem[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model CollectionItem {
+  id           String   @id @default(cuid())
+  collectionId String
+  imageId      String
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  collection Collection        @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  image      GenerationImage   @relation(fields: [imageId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, imageId])
+  @@index([collectionId, sortOrder])
+}
+
+model ExplorePost {
+  id              String        @id @default(cuid())
+  slug            String        @unique
+  titleI18n       Json
+  descriptionI18n Json?
+  /// 发布的管理员
+  authorId        String?
+  imageId         String?       @unique
+  coverKey        String
+  galleryKeys     String[]      @default([])
+  prompt          String        @db.Text
+  negativePrompt  String?       @db.Text
+  modelId         String?
+  stylePresetId   String?
+  /// { seed, aspectRatio, resolution, guidance } —— 供「一键同款」预填
+  params          Json?
+  tags            String[]      @default([])
+  category        String?
+  status          PublishStatus @default(DRAFT)
+  featured        Boolean       @default(false)
+  sortOrder       Int           @default(100)
+  viewCount       Int           @default(0)
+  likeCount       Int           @default(0)
+  remixCount      Int           @default(0)
+  publishedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  author User?            @relation("PostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  image  GenerationImage? @relation(fields: [imageId], references: [id], onDelete: SetNull)
+  model  ModelRegistry?   @relation(fields: [modelId], references: [id])
+  style  StylePreset?     @relation(fields: [stylePresetId], references: [id])
+
+  @@index([status, publishedAt(sort: Desc)])
+  @@index([status, featured, sortOrder])
+  @@index([status, category, publishedAt(sort: Desc)])
+}

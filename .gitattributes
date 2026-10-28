@@ -1,0 +1,10 @@
+# 默认按文本处理，检出时统一 LF，避免 shell 脚本 / 容器内文件被转成 CRLF
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+*.gz binary
+*.woff2 binary

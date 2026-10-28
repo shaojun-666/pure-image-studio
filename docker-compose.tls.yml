@@ -1,0 +1,20 @@
+# TLS 覆盖层。证书准备好之后这么起：
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# 证书放 deploy/certs/fullchain.pem + privkey.pem（阿里云免费 DV 证书下载后改名即可）。
+# 本地想验一遍 TLS 也能用自签：
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+#     -keyout deploy/certs/privkey.pem -out deploy/certs/fullchain.pem \
+#     -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
+name: aigc
+
+services:
+  nginx:
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    volumes:
+      # 同目标路径的挂载会被覆盖层替换（compose 按挂载点合并），
+      # 所以这里是把明文那份顶掉，而不是两个 server 同时生效
+      - ./deploy/nginx/tls:/etc/nginx/conf.d:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
